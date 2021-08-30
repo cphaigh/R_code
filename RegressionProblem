@@ -1,0 +1,351 @@
+HousePrices TOP 20% Kaggle Submission (also available on kaggle account linked on profile page)
+Corey
+8/22/2021
+library(caret)
+library(doSNOW)
+library(dplyr)
+library(Metrics)
+library(RANN)
+
+
+#Importing data
+
+setwd("C:/Users/cphai/OneDrive/Desktop/all_programs/R/KaggleCompetitions/7_20HousingPrices")
+train <- read.csv("housingTrain.csv",stringsAsFactors=FALSE)
+test <- read.csv("housingTest.csv",stringsAsFactors = FALSE)
+actual <- train$SalePrice
+Combining train and test to clean. Key is is.train
+train$SalePrice <- NULL
+train$is.train <- TRUE
+test$is.train <- FALSE
+full <- rbind(train,test)
+
+is.train <- full$is.train
+id <- full$Id
+
+
+#Romoving near zero variance predictors
+
+nearZeroVarList <- nearZeroVar(full,freqCut = 20/1)
+nearZeroVarList
+##  [1]  6  9 10 12 15 23 32 36 37 40 46 53 56 64 65 68 69 70 71 72 76
+nearZeroVarTableCharacters <- full[,nearZeroVarList]
+
+full <- full[,-nearZeroVarList]
+
+
+#finding columns with over 80% NA then dropping them
+
+for(col in names(full)){
+  sum.na=sum(is.na(full[,col]))
+  sum.notna=sum(!is.na(full[,col]))
+  na.ratio=sum.na/(sum.na+sum.notna)
+  if(na.ratio>.8){
+    print(col)
+    print(na.ratio)
+  }
+}
+## [1] "Alley"
+## [1] 0.9321686
+## [1] "PoolQC"
+## [1] 0.9965742
+## [1] "Fence"
+## [1] 0.8043851
+## [1] "MiscFeature"
+## [1] 0.9640288
+full <- full %>% 
+  select(-Alley,-PoolQC,-Fence,-MiscFeature)
+
+for(col in names(full)){
+  if(class(full[,col])=="character"){
+    sum.na=sum(is.na(full[,col]))
+    sum.notna=sum(!is.na(full[,col]))
+    na.ratio=sum.na/(sum.na+sum.notna)
+    if(na.ratio<.01 & na.ratio>0){
+      print(col)
+      print(na.ratio)
+    }
+  }
+}
+## [1] "MSZoning"
+## [1] 0.001370332
+## [1] "Exterior1st"
+## [1] 0.0003425831
+## [1] "Exterior2nd"
+## [1] 0.0003425831
+## [1] "MasVnrType"
+## [1] 0.008221994
+## [1] "Electrical"
+## [1] 0.0003425831
+## [1] "KitchenQual"
+## [1] 0.0003425831
+## [1] "SaleType"
+## [1] 0.0003425831
+
+
+#Replacing number of NA’s in character vectors less than 1% with mode
+
+full[is.na(full$MSZoning),"MSZoning"] <- "RL"
+full[is.na(full$Exterior1st),"Exterior1st"] <- "VinylSd"
+full[is.na(full$Exterior2nd),"Exterior2nd"] <- "VinylSd"
+full[is.na(full$MasVnrType),"MasVnrType"] <- "None"
+full[is.na(full$Electrical),"Electrical"] <- "SBrkr"
+full[is.na(full$KitchenQual),"KitchenQual"] <- "TA"
+full[is.na(full$SaleType),"SaleType"] <- "WD"
+
+
+#grouping Exterior2nd obeservations with a very small amount of outcomes
+
+table(full$Exterior2nd)
+## 
+## AsbShng AsphShn Brk Cmn BrkFace  CBlock CmentBd HdBoard ImStucc MetalSd   Other 
+##      38       4      22      47       3     126     406      15     447       1 
+## Plywood   Stone  Stucco VinylSd Wd Sdng Wd Shng 
+##     270       6      47    1015     391      81
+full$groupedExterior <- full$Exterior2nd
+full$groupedExterior[full$groupedExterior %in% c("AsphShn","Brk Cmn","CBlock","ImStucc","Other","Stone")] <- "other"
+full <- full %>% 
+  select(-Exterior2nd)
+  
+#Don’t know what “C (all)” is, typo? Replaced with mode in mszoning
+
+zoning <- full$MSZoning
+zoning[zoning=="C (all)"] <- "RL"
+full$MSZoning <- zoning
+
+table(full$Exterior1st)
+## 
+## AsbShng AsphShn BrkComm BrkFace  CBlock CemntBd HdBoard ImStucc MetalSd Plywood 
+##      44       2       6      87       2     126     442       1     450     221 
+##   Stone  Stucco VinylSd Wd Sdng WdShing 
+##       2      43    1026     411      56
+full[full$Exterior1st=="Wd Sdng","Exterior1st"] <- "WdSdng"
+table(full$Exterior1st,exclude=FALSE)
+## 
+## AsbShng AsphShn BrkComm BrkFace  CBlock CemntBd HdBoard ImStucc MetalSd Plywood 
+##      44       2       6      87       2     126     442       1     450     221 
+##   Stone  Stucco VinylSd  WdSdng WdShing 
+##       2      43    1026     411      56
+#Creating total bathrooms feature
+
+full$bathroomsTotal <- full$BsmtFullBath+
+  (full$BsmtHalfBath*.5)+
+  full$FullBath+
+  (full$HalfBath*.5)
+  
+#Typo garage year built after year dataset was posted
+
+full[!is.na(full$GarageYrBlt) & full$GarageYrBlt>2010,"GarageYrBlt"] <- full[!is.na(full$GarageYrBlt) & full$GarageYrBlt>2010,"YearBuilt"]
+
+#Replacing all remaining NA’s in factor variables with “missing”
+
+for(col in names(full)){
+  if(class(full[,col])=="character"){
+    full[,col]=ifelse(is.na(full[,col]),"missing",full[,col])
+  }
+}
+
+
+#changing all character vectors to factors
+
+for(col in names(full)){
+  if(class(full[,col])=="character"){
+    full[,col]=as.factor(full[,col])
+  }
+}
+
+
+#Imputing missing numeric data with knn
+
+fullImp <- full %>% 
+  select(-Id,-is.train)
+
+dummyvariables <- dummyVars(~.,data=fullImp)
+dummyvariablesPred <- predict(dummyvariables,fullImp)
+str(dummyvariablesPred)
+##  num [1:2919, 1:207] 60 20 60 70 60 50 20 60 50 190 ...
+##  - attr(*, "dimnames")=List of 2
+##   ..$ : chr [1:2919] "1" "2" "3" "4" ...
+##   ..$ : chr [1:207] "MSSubClass" "MSZoning.FV" "MSZoning.RH" "MSZoning.RL" ...
+pre.process <- preProcess(dummyvariablesPred,method="knnImpute")
+fullImputed <- predict(pre.process,dummyvariablesPred)
+
+#insert imputed numeric vectors back into data frame
+
+fullImputed <- as.data.frame(fullImputed)
+
+for(name in names(full)){
+  if(sum(is.na(full[,name]))>0){
+    print(name)
+    print(sum(is.na(full[,name])))
+  }
+}
+## [1] "LotFrontage"
+## [1] 486
+## [1] "MasVnrArea"
+## [1] 23
+## [1] "BsmtFinSF1"
+## [1] 1
+## [1] "BsmtUnfSF"
+## [1] 1
+## [1] "TotalBsmtSF"
+## [1] 1
+## [1] "BsmtFullBath"
+## [1] 2
+## [1] "BsmtHalfBath"
+## [1] 2
+## [1] "GarageYrBlt"
+## [1] 159
+## [1] "GarageCars"
+## [1] 1
+## [1] "GarageArea"
+## [1] 1
+## [1] "bathroomsTotal"
+## [1] 2
+full$LotFrontage <- fullImputed$LotFrontage
+full$MasVnrArea <- fullImputed$MasVnrArea
+full$BsmtFinSF1 <- fullImputed$BsmtFinSF1
+full$BsmtUnfSF <- fullImputed$BsmtUnfSF
+full$BsmtFullBath <- fullImputed$BsmtFullBath
+full$BsmtHalfBath <- fullImputed$BsmtHalfBath
+full$GarageYrBlt <- fullImputed$GarageYrBlt
+full$GarageCars <- fullImputed$GarageCars
+full$GarageArea <- fullImputed$GarageArea
+full$bathroomsTotal <- fullImputed$bathroomsTotal
+full$TotalBsmtSF <- fullImputed$TotalBsmtSF
+Data is cleaned! preparing for modeling
+full$Id <- id
+full$is.train <- is.train
+
+
+train <- full[full$is.train==TRUE,]
+train$salesPrice <- actual
+
+
+test <- full[full$is.train==FALSE,]
+test$salesPrice <- NA
+dim(fullImputed)
+## [1] 2919  207
+dim(train)
+## [1] 1460   58
+dim(test)
+## [1] 1459   58
+
+
+#Creating the training control for caret (10 fold cross validation)
+
+train.control <- trainControl(method="cv",
+                              number=10)
+                              
+#Creating the grid for caret
+
+tune.grid <- expand.grid(eta=c(.025,1),
+                         nrounds=c(1000,1200,1500),
+                         max_depth=c(6,8,10),
+                         min_child_weight=1,
+                         colsample_bytree=1,
+                         gamma=.1,
+                         subsample=.8)
+
+train.id <- train$Id
+train <- train %>% 
+  select(-Id)
+XGBoost Model
+cl <- makeCluster(2)
+registerDoSNOW(cl)
+
+caret.cv <- train(salesPrice~.,
+                  data=train,
+                  method="xgbTree",
+                  tuneGrid=tune.grid,
+                  trControl=train.control)
+
+stopCluster(cl)
+Saving/loading model results
+
+
+#saveRDS(caret.cv,"caret.cv3")
+caret.cv <- readRDS("caret.cv3")
+Checking results
+caret.cv$results
+##      eta max_depth gamma colsample_bytree min_child_weight subsample nrounds
+## 1  0.025         6   0.1                1                1       0.8    1000
+## 10 1.000         6   0.1                1                1       0.8    1000
+## 4  0.025         8   0.1                1                1       0.8    1000
+## 13 1.000         8   0.1                1                1       0.8    1000
+## 7  0.025        10   0.1                1                1       0.8    1000
+## 16 1.000        10   0.1                1                1       0.8    1000
+## 2  0.025         6   0.1                1                1       0.8    1200
+## 11 1.000         6   0.1                1                1       0.8    1200
+## 5  0.025         8   0.1                1                1       0.8    1200
+## 14 1.000         8   0.1                1                1       0.8    1200
+## 8  0.025        10   0.1                1                1       0.8    1200
+## 17 1.000        10   0.1                1                1       0.8    1200
+## 3  0.025         6   0.1                1                1       0.8    1500
+## 12 1.000         6   0.1                1                1       0.8    1500
+## 6  0.025         8   0.1                1                1       0.8    1500
+## 15 1.000         8   0.1                1                1       0.8    1500
+## 9  0.025        10   0.1                1                1       0.8    1500
+## 18 1.000        10   0.1                1                1       0.8    1500
+##        RMSE  Rsquared      MAE   RMSESD RsquaredSD    MAESD
+## 1  25361.30 0.8996295 14937.43 5917.401 0.05277734 1707.602
+## 10 44856.07 0.7161114 29109.09 9344.663 0.09285207 4111.978
+## 4  25862.45 0.8951786 15322.72 6074.219 0.05526803 1878.852
+## 13 45995.40 0.6980070 30788.52 7641.055 0.08675751 3390.384
+## 7  26258.97 0.8910257 15422.50 6430.123 0.05957216 1908.909
+## 16 42892.49 0.7373382 28625.19 7097.434 0.06153207 2665.363
+## 2  25355.52 0.8996673 14932.55 5913.624 0.05279838 1701.246
+## 11 44856.07 0.7161114 29109.09 9344.662 0.09285206 4111.976
+## 5  25860.50 0.8951922 15322.06 6074.140 0.05527989 1879.006
+## 14 45995.40 0.6980070 30788.52 7641.054 0.08675749 3390.383
+## 8  26258.60 0.8910277 15422.87 6429.993 0.05957556 1908.802
+## 17 42892.50 0.7373381 28625.19 7097.433 0.06153206 2665.362
+## 3  25357.70 0.8996543 14938.95 5912.499 0.05281750 1697.307
+## 12 44856.07 0.7161114 29109.09 9344.661 0.09285206 4111.975
+## 6  25860.30 0.8951937 15322.95 6074.010 0.05528345 1879.253
+## 15 45995.40 0.6980070 30788.52 7641.055 0.08675750 3390.386
+## 9  26258.50 0.8910281 15423.06 6430.037 0.05957721 1908.821
+## 18 42892.49 0.7373381 28625.19 7097.433 0.06153206 2665.363
+
+
+caret.cv$finalModel
+## ##### xgb.Booster
+## Handle is invalid! Suggest using xgb.Booster.complete
+## raw: 5.3 Mb 
+## call:
+##   xgboost::xgb.train(params = list(eta = param$eta, max_depth = param$max_depth, 
+##     gamma = param$gamma, colsample_bytree = param$colsample_bytree, 
+##     min_child_weight = param$min_child_weight, subsample = param$subsample), 
+##     data = x, nrounds = param$nrounds, objective = "reg:linear")
+## params (as set within xgb.train):
+##   eta = "0.025", max_depth = "6", gamma = "0.1", colsample_bytree = "1", min_child_weight = "1", subsample = "0.8", objective = "reg:linear", validate_parameters = "TRUE"
+## callbacks:
+##   cb.print.evaluation(period = print_every_n)
+## # of features: 181 
+## niter: 1200
+## nfeatures : 181 
+## xNames : MSSubClass MSZoningRH MSZoningRL MSZoningRM LotFrontage LotArea LotShapeIR2 LotShapeIR3 LotShapeReg LotConfigCulDSac LotConfigFR2 LotConfigFR3 LotConfigInside NeighborhoodBlueste NeighborhoodBrDale NeighborhoodBrkSide NeighborhoodClearCr NeighborhoodCollgCr NeighborhoodCrawfor NeighborhoodEdwards NeighborhoodGilbert NeighborhoodIDOTRR NeighborhoodMeadowV NeighborhoodMitchel NeighborhoodNAmes NeighborhoodNoRidge NeighborhoodNPkVill NeighborhoodNridgHt NeighborhoodNWAmes NeighborhoodOldTown NeighborhoodSawyer NeighborhoodSawyerW NeighborhoodSomerst NeighborhoodStoneBr NeighborhoodSWISU NeighborhoodTimber NeighborhoodVeenker Condition1Feedr Condition1Norm Condition1PosA Condition1PosN Condition1RRAe Condition1RRAn Condition1RRNe Condition1RRNn BldgType2fmCon BldgTypeDuplex BldgTypeTwnhs BldgTypeTwnhsE HouseStyle1.5Unf HouseStyle1Story HouseStyle2.5Fin HouseStyle2.5Unf HouseStyle2Story HouseStyleSFoyer HouseStyleSLvl OverallQual OverallCond YearBuilt YearRemodAdd RoofStyleGable RoofStyleGambrel RoofStyleHip RoofStyleMansard RoofStyleShed Exterior1stAsphShn Exterior1stBrkComm Exterior1stBrkFace Exterior1stCBlock Exterior1stCemntBd Exterior1stHdBoard Exterior1stImStucc Exterior1stMetalSd Exterior1stPlywood Exterior1stStone Exterior1stStucco Exterior1stVinylSd Exterior1stWdSdng Exterior1stWdShing MasVnrTypeBrkFace MasVnrTypeNone MasVnrTypeStone MasVnrArea ExterQualFa ExterQualGd ExterQualTA ExterCondFa ExterCondGd ExterCondPo ExterCondTA FoundationCBlock FoundationPConc FoundationSlab FoundationStone FoundationWood BsmtQualFa BsmtQualGd BsmtQualmissing BsmtQualTA BsmtExposureGd BsmtExposuremissing BsmtExposureMn BsmtExposureNo BsmtFinType1BLQ BsmtFinType1GLQ BsmtFinType1LwQ BsmtFinType1missing BsmtFinType1Rec BsmtFinType1Unf BsmtFinSF1 BsmtUnfSF TotalBsmtSF HeatingQCFa HeatingQCGd HeatingQCPo HeatingQCTA CentralAirY ElectricalFuseF ElectricalFuseP ElectricalMix ElectricalSBrkr X1stFlrSF X2ndFlrSF GrLivArea BsmtFullBath BsmtHalfBath FullBath HalfBath BedroomAbvGr KitchenQualFa KitchenQualGd KitchenQualTA TotRmsAbvGrd Fireplaces FireplaceQuFa FireplaceQuGd FireplaceQumissing FireplaceQuPo FireplaceQuTA GarageTypeAttchd GarageTypeBasment GarageTypeBuiltIn GarageTypeCarPort GarageTypeDetchd GarageTypemissing GarageYrBlt GarageFinishmissing GarageFinishRFn GarageFinishUnf GarageCars GarageArea PavedDriveP PavedDriveY WoodDeckSF MoSold YrSold SaleTypeCon SaleTypeConLD SaleTypeConLI SaleTypeConLw SaleTypeCWD SaleTypeNew SaleTypeOth SaleTypeWD SaleConditionAdjLand SaleConditionAlloca SaleConditionFamily SaleConditionNormal SaleConditionPartial is.trainTRUE groupedExteriorBrkFace groupedExteriorCmentBd groupedExteriorHdBoard groupedExteriorMetalSd groupedExteriorother groupedExteriorPlywood groupedExteriorStucco groupedExteriorVinylSd groupedExteriorWd Sdng groupedExteriorWd Shng bathroomsTotal 
+## problemType : Regression 
+## tuneValue :
+##    nrounds max_depth   eta gamma colsample_bytree min_child_weight subsample
+## 2    1200         6 0.025   0.1                1                1       0.8
+## obsLevels : NA 
+## param :
+##  list()
+
+preds <- predict(caret.cv,test)
+
+
+#Creating kaggle submission
+
+Results are RMSLE = .12646 top 19%
+results <- data.frame(Id=test$Id,SalePrice=preds)
+head(results)
+##     Id SalePrice
+## 1 1461  122140.3
+## 2 1462  158413.0
+## 3 1463  186164.1
+## 4 1464  195581.2
+## 5 1465  188000.3
+## 6 1466  173736.9
+write.csv(results,"xgboostsub6",row.names=FALSE)
