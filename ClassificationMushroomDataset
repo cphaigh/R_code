@@ -1,0 +1,196 @@
+---
+title: "mushroomFinal"
+author: "Corey"
+date: "8/15/2021"
+output: html_document
+---
+
+
+```{r libraries,echo=FALSE,warning=FALSE,message=FALSE}
+library(caret)
+library(dplyr)
+library(tidyr)
+library(RWeka)
+library(rattle)
+library(scales)
+library(OneR)
+library(rpart)
+library(rpart.plot)
+library(ggplot2)
+```
+
+```{r importingData,echo=FALSE,warning=FALSE,message=FALSE,error=FALSE,results='hide'}
+
+#loading in data from kaggle mushroom dataset
+
+setwd("C:/Users/cphai/OneDrive/Desktop/all_programs/R/KaggleCompetitions/8_8mushrooms")
+mushrooms <- read.csv("mushrooms.csv",stringsAsFactors = FALSE)
+
+
+#k=black, n=brown, b=buff, h=chocolate, r=green, o=orange, u=purple, w=white, y=yellow
+
+#changing strings to factors
+
+for(names in names(mushrooms)){
+  if(class(mushrooms[,names])=="character"){
+    mushrooms[,names] = as.factor(mushrooms[,names])
+  }
+}
+
+#checking for columns with all same results
+
+for(name in names(mushrooms)){
+  if(length(unique(mushrooms[,name]))==1){
+    print(name)
+    print(length(unique(mushrooms[,name])))
+  }
+}
+
+#veil.type had all same results, will be dropped
+
+mushrooms$veil.type <- NULL
+
+levels(mushrooms$class) <- c("edible","poisonous")
+```
+
+
+```{r plotOfPoisonousVsEdible}
+
+ggplot(data=mushrooms,aes(x=class,fill=class))+
+  geom_bar()+
+  scale_fill_manual(values = c("green","red"))+
+  labs(y="Mushroom count",x="",title="Mushrooms",subtitle="Edible vs Poisonous")
+```
+
+```{r splitTrainAndTest,echo=FALSE}
+
+#creating train and test set
+
+is.train <- createDataPartition(mushrooms$class,p=.7,list=FALSE)
+train <- mushrooms[is.train,]
+test <- mushrooms[-is.train,]
+
+```
+
+```{r singleRuleLearnerModeling,echo=FALSE}
+
+#single rule learner to tell if a mushroom is poisonous
+
+srl <- OneR(class~.,data=mushrooms)
+preds <- predict(srl,test)
+```
+
+## Rule learner with one rule
+```{r singleRuleOutcome}
+srl
+```
+
+
+```{r creatingTableOfRuleLearnerOutcome, echo=FALSE}
+
+countTable <- as.data.frame(srl$cont_table)
+levels(countTable$odor) <- c("almond","anise","creosote","fishy","foul","musty","none","pungent","spicy")
+
+wider <- pivot_wider(countTable,
+                     names_from=odor,
+                     values_from = Freq)
+
+numOfPoison <- nrow(countTable)/2
+resultsTable <- data.frame(smell=1:numOfPoison,
+                           edible=1:numOfPoison,
+                           poisonous=1:numOfPoison)
+
+for(i in 1:nrow(resultsTable))
+for(i in 2:10){
+  resultsTable[i-1,1]=names(wider[i])
+  resultsTable[i-1,2] = wider[1,i]
+  resultsTable[i-1,3]=wider[2,i]
+}
+
+resultsTable %>% 
+  arrange(desc(edible))
+
+for(i in 1:nrow(resultsTable)){
+  if(resultsTable[i,2] < resultsTable[i,3]){
+    temp=resultsTable[i,2]
+    resultsTable[i,2]=resultsTable[i,3]
+    resultsTable[i,3]=temp
+  }
+}
+names(resultsTable) <- c("smell","predicted correct","predicted wrong")
+resultsTable$accuracy <- 1
+
+for(i in 1:nrow(resultsTable)){
+  if(resultsTable[i,3]!=0){
+    resultsTable[i,4]=resultsTable[i,2]/(resultsTable[i,2]+resultsTable[i,3])
+  }
+}
+resultsTable$accuracy <- percent(resultsTable$accuracy)
+```
+
+
+### Results
+One rule predictions predicted correctly 100% of the time for every smell except one
+```{r finalOneRuleTable}
+resultsTable
+```
+
+
+```{r multipleRuleLearnersModeling, echo=FALSE}
+
+#multiple rule learners 100% accuracy
+
+trl <- JRip(class~.,data=train)
+predtrl <- predict(trl,test)
+```
+
+## Multiple rules rule learner
+```{r multipleRuleLearnersRules}
+trl
+```
+
+### Results
+```{r resultsMultipleRuleLearner}
+table(predictions=predtrl,actual=test$class)
+```
+
+
+```{r DecisionTreeModeling,echo=FALSE}
+
+#decision tree
+
+train.control <- trainControl(method="cv",
+                              number=10)
+tune.grid <- expand.grid(maxdepth=1:3)
+
+levels(train$odor) <- c("almond","anise","creosote","fishy","foul","musty","none","pungent","spicy")
+levels(train$spore.print.color) <- c("buff","chocolate","black","brown","orange","green","purple","white","yellow")
+levels(train$class) <- c("edible","poisonous")
+
+set.seed(123)
+dt <- train(class~.,data=train,
+            method="rpart2",
+            trControl=train.control,
+            tuneGrid=tune.grid)
+
+levels(test$odor) <- c("almond","anise","creosote","fishy","foul","musty","none","pungent","spicy")
+levels(test$spore.print.color) <- c("buff","chocolate","black","brown","orange","green","purple","white","yellow")
+levels(test$class) <- c("edible","poisonous")
+
+depth2 <- update(dt,param=list(maxdepth=2))
+preds2 <- predict(dt,test)
+head(preds)
+```
+
+
+## Decision Tree
+```{r decisionTreeOutput}
+dt
+```
+
+### Results
+```{r decisionTreePlot}
+
+#two branch decision tree. Accuracy 97.87%.
+confusionMatrix(preds2,test$class)
+rpart.plot(depth2$finalModel)
